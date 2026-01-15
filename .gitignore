@@ -1,0 +1,10 @@
+/.idea/
+__pycache__/ 在·
+*.pyc
+*.pyo
+*.pyd
+checkpoints/
+logs/
+*.log
+*.pth
+/.gitignore
