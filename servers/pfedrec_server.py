@@ -4,8 +4,8 @@ import logging
 import random
 import os
 from clients.pfedrec_client import PFedRec_Client
-from model.pfedrec_model import PFedRecModel
-from model.embedding.pfedrec_embedding import PFedRecEmbedding
+from network.pfedrec_network import PFedRecNetwork
+from network.embedding.pfedrec_embedding import PFedRecEmbedding
 from utils.utils_checkpoint import save_checkpoint
 from metrics import MetronAtK
 
@@ -14,7 +14,7 @@ class PFedRec_Server(Base_Server):
         super().__init__(config)
         self.config = config
         self.clients = {}
-        self.model_template = PFedRecModel(config)
+        self.model_template = PFedRecNetwork(config)
         temp_embedding = PFedRecEmbedding(config['num_items'], config['latent_dim'])
         self.global_item_embeddings = temp_embedding.state_dict()
         self.metron = MetronAtK(top_k=10)
@@ -56,25 +56,23 @@ class PFedRec_Server(Base_Server):
         batch_neg_items = []
         batch_neg_scores = []
 
-        if self.global_item_embeddings:
-            self.model_template.embedding.load_state_dict(self.global_item_embeddings, strict=False)
-
         for u in unique_test_users:
             u_id = u.item()
 
-            # Test Item
             idx_test = (test_users_t == u)
             u_test_items = test_items_t[idx_test]
 
-            # Neg Items
             idx_neg = (neg_users_t == u)
             u_neg_items = neg_items_t[idx_neg]
 
+            embedding_state = self.global_item_embeddings
+
             if u_id in self.clients:
                 client = self.clients[u_id]
-                u_test_preds = client.evaluate(u_test_items, self.global_item_embeddings)
-                u_neg_preds = client.evaluate(u_neg_items, self.global_item_embeddings)
+                u_test_preds = client.evaluate(u_test_items, embedding_state)
+                u_neg_preds = client.evaluate(u_neg_items, embedding_state)
             else:
+                self.model_template.embedding.load_state_dict(embedding_state, strict=False)
                 self.model_template.eval()
                 with torch.no_grad():
                      u_test_preds = self.model_template(u_test_items)

@@ -1,0 +1,2 @@
+1.先把embedding和prediction的封装弄得更好一点
+2.把训练的逻辑放到server中去

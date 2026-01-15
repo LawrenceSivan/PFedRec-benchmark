@@ -18,6 +18,7 @@ def parse_args():
     parser.add_argument('--use_cuda', type=bool, default=True)
     parser.add_argument('--device_id', type=int, default=0)
     parser.add_argument('--algorithm', type=str, default='pfedrec')
+    parser.add_argument('--model_name', type=str, default='mlp', help='Internal model name, e.g. mlp')
     parser.add_argument('--similarity_metric', type=str, default='cosine')
     parser.add_argument('--neighborhood_size', type=int, default=10)
     parser.add_argument('--neighborhood_threshold', type=float, default=0.0)

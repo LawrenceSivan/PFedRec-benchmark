@@ -7,8 +7,8 @@ import copy
 import numpy as np
 from sklearn.metrics import pairwise_distances
 from clients.gpfedrec_client import GPFedRec_Client
-from model.gpfedrec_model import GPFedRecModel
-from model.embedding.gpfedrec_embedding import GPFedRecEmbedding
+from network.gpfedrec_network import GPFedRecNetwork
+from network.embedding.gpfedrec_embedding import GPFedRecEmbedding
 from utils.utils_checkpoint import save_checkpoint
 from metrics import MetronAtK
 
@@ -17,7 +17,7 @@ class GPFedRec_Server(Base_Server):
         super().__init__(config)
         self.config = config
         self.clients = {}
-        self.model_template = GPFedRecModel(config)
+        self.model_template = GPFedRecNetwork(config)
         temp_embedding = GPFedRecEmbedding(config['num_items'], config['latent_dim'])
 
         self.initial_global_embedding = temp_embedding.state_dict()
@@ -33,7 +33,7 @@ class GPFedRec_Server(Base_Server):
             return copy.deepcopy(self.global_embedding)
         return self.user_embeddings_map[user_id]
 
-    def _construct_user_relation_graph(self, round_user_params, user_id_to_idx):
+    def _construct_user_relation_graph(self, round_user_params):
         item_num = self.config['num_items']
         latent_dim = self.config['latent_dim']
         similarity_metric = self.config['similarity_metric']
@@ -41,12 +41,9 @@ class GPFedRec_Server(Base_Server):
         num_participants = len(round_user_params)
         item_embedding = np.zeros((num_participants, item_num * latent_dim), dtype='float32')
 
-        for user_id, params in round_user_params.items():
-            idx = user_id_to_idx[user_id]
+        for i, (user_id, params) in enumerate(round_user_params.items()):
             weight = params.get('embedding.weight')
-            if weight is None:
-                 raise ValueError(f"Could not find embedding weights for user {user_id}")
-            item_embedding[idx] = weight.cpu().numpy().flatten()
+            item_embedding[i] = weight.cpu().numpy().flatten()
 
         adj = pairwise_distances(item_embedding, metric=similarity_metric)
         if similarity_metric == 'cosine':
@@ -60,11 +57,11 @@ class GPFedRec_Server(Base_Server):
 
         topk_user_relation_graph = np.zeros(user_relation_graph.shape, dtype='float32')
         if neighborhood_size > 0:
-            for i in range(user_relation_graph.shape[0]):
-                user_neighborhood = user_relation_graph[i]
+            for user in range(user_relation_graph.shape[0]):
+                user_neighborhood = user_relation_graph[user]
                 topk_indexes = user_neighborhood.argsort()[-neighborhood_size:][::-1]
-                for idx in topk_indexes:
-                    topk_user_relation_graph[i][idx] = 1/neighborhood_size
+                for i in topk_indexes:
+                    topk_user_relation_graph[user][i] = 1 / neighborhood_size
         else:
             similarity_threshold = np.mean(user_relation_graph) * neighborhood_threshold
             for i in range(user_relation_graph.shape[0]):
@@ -78,7 +75,7 @@ class GPFedRec_Server(Base_Server):
 
         return topk_user_relation_graph
 
-    def _mp_on_graph(self, round_user_params, topk_user_relation_graph, user_id_to_idx, idx_to_user_id):
+    def _mp_on_graph(self, round_user_params, topk_user_relation_graph):
         layers = self.config['mp_layers']
         item_num = self.config['num_items']
         latent_dim = self.config['latent_dim']
@@ -86,20 +83,20 @@ class GPFedRec_Server(Base_Server):
         num_participants = len(round_user_params)
         item_embedding = np.zeros((num_participants, item_num*latent_dim), dtype='float32')
 
-        for user_id, params in round_user_params.items():
-            idx = user_id_to_idx[user_id]
+        for i, (user_id, params) in enumerate(round_user_params.items()):
             weight = params.get('embedding.weight')
-            item_embedding[idx] = weight.cpu().numpy().flatten()
+            item_embedding[i] = weight.cpu().numpy().flatten()
 
         aggregated_item_embedding = np.matmul(topk_user_relation_graph, item_embedding)
         for layer in range(layers-1):
             aggregated_item_embedding = np.matmul(topk_user_relation_graph, aggregated_item_embedding)
 
         item_embedding_dict = {}
-        for idx in range(num_participants):
-            user_id = idx_to_user_id[idx]
-            user_emb_flat = aggregated_item_embedding[idx]
+        for i, user_id in enumerate(round_user_params.keys()):
+            user_emb_flat = aggregated_item_embedding[i]
             item_embedding_dict[user_id] = torch.from_numpy(user_emb_flat.reshape(item_num, latent_dim))
+
+        item_embedding_dict['global'] = sum(item_embedding_dict.values())/len(round_user_params)
 
         return item_embedding_dict
 
@@ -111,26 +108,19 @@ class GPFedRec_Server(Base_Server):
         if not client_params_dict:
              return
 
-        current_participants = list(client_params_dict.keys())
-        user_id_to_idx = {uid: i for i, uid in enumerate(current_participants)}
-        idx_to_user_id = {i: uid for i, uid in enumerate(current_participants)}
-
-        user_relation_graph = self._construct_user_relation_graph(client_params_dict, user_id_to_idx)
+        user_relation_graph = self._construct_user_relation_graph(client_params_dict)
 
         topk_graph = self._select_topk_neighborhood(user_relation_graph)
 
-        updated_embeddings_dict = self._mp_on_graph(client_params_dict, topk_graph, user_id_to_idx, idx_to_user_id)
+        updated_embeddings_dict = self._mp_on_graph(client_params_dict, topk_graph)
+
+        global_weight = updated_embeddings_dict.pop('global')
+        self.global_embedding = {'embedding.weight': global_weight.cpu()}
 
         for user_id, weight_tensor in updated_embeddings_dict.items():
             new_state_dict = {'embedding.weight': weight_tensor.cpu()}
             self.user_embeddings_map[user_id] = new_state_dict
 
-        global_weight = torch.zeros_like(list(updated_embeddings_dict.values())[0])
-        for w in updated_embeddings_dict.values():
-            global_weight += w
-        global_weight /= len(updated_embeddings_dict)
-
-        self.global_embedding = {'embedding.weight': global_weight.cpu()}
 
     def evaluate(self, test_data):
         test_users_t = test_data[0]
@@ -217,20 +207,27 @@ class GPFedRec_Server(Base_Server):
 
             logging.info(f"Round {round_id}: {len(participants)} participants.")
 
+            # 2. Get Training Data for this round (with negative sampling)
+            all_train_data = sample_generator.store_all_train_data(self.config['num_negative'])
+
             participant_params_dict = {}
             loss_list = []
 
             for user_id in participants:
-                # Basic check if user has data
                 if user_id not in sample_generator.user_pool:
                      continue
 
                 if user_id not in self.clients:
                     self.clients[user_id] = GPFedRec_Client(user_id, self.config, self.model_template)
                 client = self.clients[user_id]
+
                 current_embedding = self.get_user_embedding(user_id)
                 reg_target = current_embedding.get('embedding.weight')
-                client_item_params, loss = client.train(sample_generator, current_embedding, reg_item_embedding_state=reg_target)
+
+                # fetch own data
+                user_train_data = [all_train_data[0][user_id], all_train_data[1][user_id], all_train_data[2][user_id]]
+
+                client_item_params, loss = client.train(user_train_data, current_embedding, reg_item_embedding_state=reg_target)
                 participant_params_dict[user_id] = client_item_params
                 loss_list.append(loss)
 

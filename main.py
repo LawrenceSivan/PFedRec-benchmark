@@ -5,6 +5,7 @@ import pandas as pd
 import numpy as np
 
 from data.dataloader import SampleGenerator
+
 from servers.pfedrec_server import PFedRec_Server
 from servers.gpfedrec_server import GPFedRec_Server
 from utils.parser import parse_args
@@ -81,8 +82,10 @@ if __name__ == '__main__':
 
     if config['algorithm'] == 'gpfedrec':
         server = GPFedRec_Server(config)
-    else:
+    elif config['algorithm'] == 'pfedrec':
         server = PFedRec_Server(config)
+    else:
+        raise ValueError(f"Unknown algorithm: {config['algorithm']}")
 
     server.train(sample_generator)
 
